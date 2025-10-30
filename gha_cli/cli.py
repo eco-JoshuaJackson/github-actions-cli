@@ -2,13 +2,13 @@
 import logging
 import os
 from collections import namedtuple
-from datetime import datetime
-from typing import Optional, List, Set, Dict, Union, Any, Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import click
 import coloredlogs
 import yaml
-from github import Github, UnknownObjectException, GitRelease
+from github import Github, GitRelease, UnknownObjectException
 from github.Organization import Organization
 from github.PaginatedList import PaginatedList
 from github.Repository import Repository
@@ -23,12 +23,18 @@ ActionVersion = namedtuple("ActionVersion", ["name", "current", "latest"])
 
 def _is_sha(current_version: str) -> bool:
     """Check if the current version is a SHA (40 characters long)"""
-    return len(current_version) == 40 and all(c in "0123456789abcdef" for c in current_version.lower())
+    return len(current_version) == 40 and all(
+        c in "0123456789abcdef" for c in current_version.lower()
+    )
 
 
 class GithubActionsTools(object):
-    _wf_cache: dict[str, dict[str, Any]] = dict()  # repo_name -> [path -> workflow/yaml]
-    __actions_latest_release: dict[str, Tuple[str, datetime]] = dict()  # action_name@current_release -> latest_release_tag
+    _wf_cache: dict[str, dict[str, Any]] = (
+        dict()
+    )  # repo_name -> [path -> workflow/yaml]
+    __actions_latest_release: dict[str, Tuple[str, datetime]] = (
+        dict()
+    )  # action_name@current_release -> latest_release_tag
 
     def __init__(self, github_token: str, update_major_version_only: bool = False):
         self.client = Github(login_or_token=github_token)
@@ -73,7 +79,7 @@ class GithubActionsTools(object):
 
     def get_action_latest_release(self, uses_tag_value: str) -> Optional[str]:
         """Check whether an action has an update, and return the latest version if it does syntax for uses:
-           https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_iduses
+        https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_iduses
         """
         if "@" not in uses_tag_value:
             return None
@@ -82,12 +88,24 @@ class GithubActionsTools(object):
             latest_release = self.__actions_latest_release[action_name]
             logging.debug(f"Found in cache {action_name}: {latest_release}")
             if _is_sha(current_version):
-                logging.debug(f"Current version for {action_name} is a SHA: {current_version}, checking whether latest release is newer")
-                if latest_release[1] > datetime.now():
+                logging.debug(
+                    f"Current version for {action_name} is a SHA: {current_version}, checking whether latest release is newer"
+                )
+                now = datetime.now(timezone.utc)
+                release_time = latest_release[1]
+                if release_time.tzinfo is None:
+                    release_time = release_time.replace(tzinfo=timezone.utc)
+                if release_time > now:
                     return latest_release[0]
-            return latest_release[0] if self._compare_versions(latest_release[0], current_version) > 0 else None
+            return (
+                latest_release[0]
+                if self._compare_versions(latest_release[0], current_version) > 0
+                else None
+            )
 
-        logging.debug(f"Checking for updates for {action_name}@{current_version}: Getting repo {action_name}")
+        logging.debug(
+            f"Checking for updates for {action_name}@{current_version}: Getting repo {action_name}"
+        )
         try:
             repo: Repository = self._get_repo(action_name)
         except ValueError as e:
@@ -97,36 +115,54 @@ class GithubActionsTools(object):
         try:
             latest_release = repo.get_latest_release()
             if latest_release is None:
-                logging.warning(f"No latest release found for repository: {action_name}")
+                logging.warning(
+                    f"No latest release found for repository: {action_name}"
+                )
                 return None
         except UnknownObjectException:
             logging.warning(f"No releases found for repository: {action_name}")
 
         if _is_sha(current_version):
             logging.debug(
-                f"Current version for {action_name} is a SHA: {current_version}, checking whether latest release is newer")
+                f"Current version for {action_name} is a SHA: {current_version}, checking whether latest release is newer"
+            )
             current_version_commit = repo.get_commit(current_version)
-            if latest_release.last_modified_datetime > current_version_commit.last_modified_datetime:
-                self.__actions_latest_release[action_name] = self._fix_version(latest_release.tag_name), latest_release.last_modified_datetime
+            if (
+                latest_release.last_modified_datetime
+                > current_version_commit.last_modified_datetime
+            ):
+                self.__actions_latest_release[action_name] = (
+                    self._fix_version(latest_release.tag_name),
+                    latest_release.last_modified_datetime,
+                )
                 return latest_release.tag_name
         if self._compare_versions(latest_release.tag_name, current_version) > 0:
-            self.__actions_latest_release[action_name] = self._fix_version(latest_release.tag_name), latest_release.last_modified_datetime
+            self.__actions_latest_release[action_name] = (
+                self._fix_version(latest_release.tag_name),
+                latest_release.last_modified_datetime,
+            )
             return latest_release.tag_name
         return None
 
     @staticmethod
     def is_local_repo(repo_name: str) -> bool:
-        return os.path.exists(repo_name) and os.path.exists(os.path.join(repo_name, ".git"))
+        return os.path.exists(repo_name) and os.path.exists(
+            os.path.join(repo_name, ".git")
+        )
 
     @staticmethod
     def list_full_paths(path: str) -> set[str]:
         if not os.path.exists(path):
             return set()
-        return {os.path.join(path, file) for file in os.listdir(path) if file.endswith((".yml", ".yaml"))}
+        return {
+            os.path.join(path, file)
+            for file in os.listdir(path)
+            if file.endswith((".yml", ".yaml"))
+        }
 
     def get_workflow_action_names(self, repo_name: str, workflow_path: str) -> Set[str]:
         workflow_content = self._get_workflow_file_content(repo_name, workflow_path)
-        workflow = yaml.load(workflow_content, Loader=yaml.CLoader)
+        workflow = yaml.safe_load(workflow_content, Loader=yaml.CLoader)
         res = set()
         for job in workflow.get("jobs", dict()).values():
             for step in job.get("steps", list()):
@@ -136,27 +172,33 @@ class GithubActionsTools(object):
 
     def get_repo_actions_latest(self, repo_name: str) -> Dict[str, List[ActionVersion]]:
         workflow_paths = self._get_github_workflow_filenames(repo_name)
-        res:Dict[str, List[ActionVersion]] = dict()
-        actions_per_path:Dict[str,Set[str]]=dict()  # actions without version, e.g., actions/checkout
+        res: Dict[str, List[ActionVersion]] = dict()
+        actions_per_path: Dict[str, Set[str]] = (
+            dict()
+        )  # actions without version, e.g., actions/checkout
         for path in workflow_paths:
             res[path] = list()
             actions = self.get_workflow_action_names(repo_name, path)
             for action in actions:
-                actions_per_path.setdefault(path,set()).add(action)
+                actions_per_path.setdefault(path, set()).add(action)
         all_actions_no_version = set()
         for path, actions in actions_per_path.items():
             for action in actions:
                 if "@" not in action:
                     continue
                 all_actions_no_version.add(action.split("@")[0])
-        logging.info(f"Found {len(all_actions_no_version)} actions in workflows: {", ".join(all_actions_no_version)}")
+        logging.info(
+            f"Found {len(all_actions_no_version)} actions in workflows: {', '.join(all_actions_no_version)}"
+        )
         for path, actions in actions_per_path.items():
             for action in actions:
                 if "@" not in action:
                     continue
                 action_name, curr_version = action.split("@")
                 latest_version = self.get_action_latest_release(action)
-                res[path].append(ActionVersion(action_name, curr_version, latest_version))
+                res[path].append(
+                    ActionVersion(action_name, curr_version, latest_version)
+                )
         return res
 
     def get_repo_workflow_names(self, repo_name: str) -> Dict[str, str]:
@@ -165,18 +207,18 @@ class GithubActionsTools(object):
         for path in workflow_paths:
             try:
                 content = self._get_workflow_file_content(repo_name, path)
-                yaml_content = yaml.load(content, Loader=yaml.CLoader)
+                yaml_content = yaml.safe_load(content, Loader=yaml.CLoader)
                 res[path] = yaml_content.get("name", path)
             except FileNotFoundError as ex:
                 logging.warning(ex)
         return res
 
     def update_actions(
-            self,
-            repo_name: str,
-            workflow_path: str,
-            updates: List[ActionVersion],
-            commit_msg: str,
+        self,
+        repo_name: str,
+        workflow_path: str,
+        updates: List[ActionVersion],
+        commit_msg: str,
     ) -> None:
         workflow_content = self._get_workflow_file_content(repo_name, workflow_path)
         if isinstance(workflow_content, bytes):
@@ -187,9 +229,13 @@ class GithubActionsTools(object):
             current_action = f"{update.name}@{update.current}"
             latest_action = f"{update.name}@{update.latest}"
             workflow_content = workflow_content.replace(current_action, latest_action)
-        self._update_workflow_content(repo_name, workflow_path, workflow_content, commit_msg)
+        self._update_workflow_content(
+            repo_name, workflow_path, workflow_content, commit_msg
+        )
 
-    def _update_workflow_content(self, repo_name: str, workflow_path: str, workflow_content: str, commit_msg: str):
+    def _update_workflow_content(
+        self, repo_name: str, workflow_path: str, workflow_content: str, commit_msg: str
+    ):
         if self.is_local_repo(repo_name):
             with open(workflow_path, "w") as f:
                 f.write(workflow_content)
@@ -205,7 +251,9 @@ class GithubActionsTools(object):
             workflow_content,
             current_content.sha,
         )
-        click.secho(f"Committed changes to workflow in {repo_name}:{workflow_path}", fg="cyan")
+        click.secho(
+            f"Committed changes to workflow in {repo_name}:{workflow_path}", fg="cyan"
+        )
         return res
 
     def _get_github_workflow_filenames(self, repo_name: str) -> Set[str]:
@@ -215,14 +263,24 @@ class GithubActionsTools(object):
         if self.is_local_repo(repo_name):
             return self.list_full_paths(os.path.join(repo_name, ".github", "workflows"))
         if repo_name.startswith("."):
-            click.secho(f"{repo_name} is not a local repo and does not start with owner/repo", fg="red", err=True)
-            raise ValueError(f"{repo_name} is not a local repo and does not start with owner/repo")
+            click.secho(
+                f"{repo_name} is not a local repo and does not start with owner/repo",
+                fg="red",
+                err=True,
+            )
+            raise ValueError(
+                f"{repo_name} is not a local repo and does not start with owner/repo"
+            )
         # Remote
         repo: Repository = self._get_repo(repo_name)
-        self._wf_cache[repo_name] = {wf.path: wf for wf in repo.get_workflows() if wf.path.startswith(".github/")}
+        self._wf_cache[repo_name] = {
+            wf.path: wf for wf in repo.get_workflows() if wf.path.startswith(".github/")
+        }
         return set(self._wf_cache[repo_name].keys())
 
-    def _get_workflow_file_content(self, repo_name: str, workflow_path: str) -> Union[str, bytes]:
+    def _get_workflow_file_content(
+        self, repo_name: str, workflow_path: str
+    ) -> Union[str, bytes]:
         workflow_paths = self._get_github_workflow_filenames(repo_name)
 
         if self.is_local_repo(repo_name):
@@ -245,7 +303,9 @@ class GithubActionsTools(object):
             repo: Repository = self._get_repo(repo_name)
             workflow_content = repo.get_contents(workflow_path)
         except UnknownObjectException:
-            raise FileNotFoundError(f"Workflow not found in repository: {repo_name}, path: {workflow_path}")
+            raise FileNotFoundError(
+                f"Workflow not found in repository: {repo_name}, path: {workflow_path}"
+            )
         return workflow_content.decoded_content
 
 
@@ -257,7 +317,10 @@ You can provide it using GITHUB_TOKEN environment variable or --github-token opt
 
 @click.group(invoke_without_command=True)
 @click.option(
-    "-v", "--verbose", count=True, help="Increase verbosity, can be used multiple times to increase verbosity"
+    "-v",
+    "--verbose",
+    count=True,
+    help="Increase verbosity, can be used multiple times to increase verbosity",
 )
 @click.option(
     "--repo",
@@ -288,7 +351,9 @@ def cli(ctx, verbose: int, repo: str, github_token: Optional[str], major_only: b
         coloredlogs.install(level="DEBUG")
     ctx.ensure_object(dict)
     repo_name = os.getcwd() if repo == "." else repo
-    click.secho(f"GitHub Actions CLI, scanning repo in {repo_name}", fg="green", bold=True)
+    click.secho(
+        f"GitHub Actions CLI, scanning repo in {repo_name}", fg="green", bold=True
+    )
     if not github_token:
         click.secho(GITHUB_ACTION_NOT_PROVIDED_MSG, fg="yellow", err=True)
     ctx.obj["gh"] = GithubActionsTools(github_token, major_only)
@@ -316,7 +381,9 @@ def cli(ctx, verbose: int, repo: str, github_token: Optional[str], major_only: b
 def update_actions(ctx, update: bool, commit_msg: str) -> None:
     gh, repo_name = ctx.obj["gh"], ctx.obj["repo"]
     workflow_names = gh.get_repo_workflow_names(repo_name)
-    logging.info(f"Found {len(workflow_names)} workflows in {repo_name}: {', '.join(list(workflow_names.keys()))}")
+    logging.info(
+        f"Found {len(workflow_names)} workflows in {repo_name}: {', '.join(list(workflow_names.keys()))}"
+    )
     workflow_action_versions = gh.get_repo_actions_latest(repo_name)
     max_action_name_length, max_version_length = 0, 0
     for workflow_path, actions in workflow_action_versions.items():
@@ -324,7 +391,10 @@ def update_actions(ctx, update: bool, commit_msg: str) -> None:
             max_action_name_length = max(max_action_name_length, len(action.name))
             max_version_length = max(max_version_length, len(action.current))
     for workflow_path, workflow_name in workflow_names.items():
-        click.secho(f"{workflow_path} ({click.style(workflow_name, fg='bright_cyan')}):", fg="bright_blue")
+        click.secho(
+            f"{workflow_path} ({click.style(workflow_name, fg='bright_cyan')}):",
+            fg="bright_blue",
+        )
         for action in workflow_action_versions[workflow_path]:
             s = f"\t{action.name:<{max_action_name_length + 5}} {action.current:>{max_version_length + 2}}"
             if action.latest:
@@ -336,7 +406,9 @@ def update_actions(ctx, update: bool, commit_msg: str) -> None:
     if not update:
         return
     for workflow in workflow_action_versions:
-        gh.update_actions(repo_name, workflow, workflow_action_versions[workflow], commit_msg)
+        gh.update_actions(
+            repo_name, workflow, workflow_action_versions[workflow], commit_msg
+        )
 
 
 @cli.command(help="List actions in a workflow")
